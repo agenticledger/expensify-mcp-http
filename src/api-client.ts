@@ -1,0 +1,379 @@
+/**
+ * Expensify Integration Server API Client
+ *
+ * Single POST endpoint: https://integrations.expensify.com/Integration-Server/ExpensifyIntegrations
+ * Auth: Partner credentials (partnerUserID + partnerUserSecret) sent as form params
+ * Request format: application/x-www-form-urlencoded with requestJobDescription JSON
+ * Response format: JSON (or raw text for file downloads)
+ *
+ * All requests go to the same endpoint. The "type" field in requestJobDescription
+ * determines which operation is performed.
+ *
+ * Rate limits: 50 jobs/minute
+ */
+
+const ENDPOINT = 'https://integrations.expensify.com/Integration-Server/ExpensifyIntegrations';
+
+export class ExpensifyClient {
+  private partnerUserID: string;
+  private partnerUserSecret: string;
+
+  constructor(partnerUserID: string, partnerUserSecret: string) {
+    this.partnerUserID = partnerUserID;
+    this.partnerUserSecret = partnerUserSecret;
+  }
+
+  /**
+   * Core request method. All Expensify API calls go through this.
+   * Sends form-encoded POST with requestJobDescription JSON payload.
+   */
+  private async request<T>(
+    jobDescription: Record<string, any>,
+    additionalParams?: Record<string, string>
+  ): Promise<T> {
+    const formData = new URLSearchParams();
+    formData.append('requestJobDescription', JSON.stringify(jobDescription));
+
+    if (additionalParams) {
+      Object.entries(additionalParams).forEach(([key, value]) => {
+        formData.append(key, value);
+      });
+    }
+
+    const response = await fetch(ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: formData.toString(),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Expensify API Error ${response.status}: ${text}`);
+    }
+
+    const text = await response.text();
+
+    // Try parsing as JSON first; some responses are plain text
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      return text as unknown as T;
+    }
+  }
+
+  /**
+   * Build the base job description with credentials.
+   */
+  private baseJob(type: string, extra: Record<string, any> = {}): Record<string, any> {
+    return {
+      type,
+      credentials: {
+        partnerUserID: this.partnerUserID,
+        partnerUserSecret: this.partnerUserSecret,
+      },
+      ...extra,
+    };
+  }
+
+  // ──────────────────────────────────────────────────────
+  // Export Reports
+  // ──────────────────────────────────────────────────────
+
+  /**
+   * Export expense reports. Two-step flow:
+   * 1. This call returns a filename
+   * 2. Use downloadFile() to get the actual data
+   *
+   * Template can be a Freemarker template string that controls output format.
+   */
+  async exportReports(params: {
+    startDate: string;
+    endDate: string;
+    reportState?: string;
+    limit?: string;
+    employeeEmail?: string;
+    markedAsExported?: string;
+    template?: string;
+    outputFormat?: string;
+  }) {
+    const filters: Record<string, any> = {
+      startDate: params.startDate,
+      endDate: params.endDate,
+    };
+    if (params.employeeEmail) filters.employeeEmail = params.employeeEmail;
+    if (params.markedAsExported) filters.markedAsExported = params.markedAsExported;
+
+    const onReceive: Record<string, any> = {
+      immediateResponse: ['returnRandomFileName'],
+    };
+
+    const inputSettings: Record<string, any> = {
+      type: 'combinedReportData',
+      filters,
+    };
+    if (params.reportState) inputSettings.reportState = params.reportState;
+    if (params.limit) inputSettings.limit = params.limit;
+
+    const outputSettings: Record<string, any> = {
+      fileExtension: params.outputFormat || 'json',
+    };
+
+    // Default template: export as JSON
+    const template = params.template || [
+      '[<#list reports as report>',
+      '{',
+      '  "reportName": "${report.reportName}",',
+      '  "reportID": "${report.reportID}",',
+      '  "status": "${report.status}",',
+      '  "total": ${report.total},',
+      '  "currency": "${report.currency}",',
+      '  "submitterEmail": "${report.submitterEmail}",',
+      '  "created": "${report.created}",',
+      '  "transactionCount": ${report.transactionList?size},',
+      '  "transactions": [<#list report.transactionList as t>',
+      '    {"merchant":"${t.merchant}","amount":${t.amount},"created":"${t.created}","category":"${t.category}","comment":"${t.comment}"}<#if t_has_next>,</#if>',
+      '  </#list>]',
+      '}<#if report_has_next>,</#if>',
+      '</#list>]',
+    ].join('\n');
+
+    const job = this.baseJob('file', {
+      onReceive,
+      inputSettings,
+      outputSettings,
+    });
+
+    return this.request<any>(job, { template });
+  }
+
+  // ──────────────────────────────────────────────────────
+  // Download File
+  // ──────────────────────────────────────────────────────
+
+  /**
+   * Download a file generated by exportReports.
+   * The filename is returned by the export call.
+   */
+  async downloadFile(fileName: string, fileSystem?: string) {
+    const job = this.baseJob('download', {
+      fileName,
+      fileSystem: fileSystem || 'integrationServer',
+    });
+    return this.request<any>(job);
+  }
+
+  // ──────────────────────────────────────────────────────
+  // Create Expense Report
+  // ──────────────────────────────────────────────────────
+
+  /**
+   * Create a new expense report with transactions.
+   * Expenses is a JSON array of expense objects.
+   */
+  async createReport(params: {
+    employeeEmail: string;
+    reportTitle?: string;
+    expenses: string;
+  }) {
+    const job = this.baseJob('create', {
+      inputSettings: {
+        type: 'expenses',
+        employeeEmail: params.employeeEmail,
+      },
+    });
+
+    const transactionList = params.expenses;
+
+    return this.request<any>(job, { data: transactionList });
+  }
+
+  // ──────────────────────────────────────────────────────
+  // Get Policy List
+  // ──────────────────────────────────────────────────────
+
+  /**
+   * Get list of policies the partner can access.
+   */
+  async getPolicyList(adminOnly?: boolean) {
+    const inputSettings: Record<string, any> = {
+      type: 'policyList',
+    };
+    if (adminOnly !== undefined) inputSettings.adminOnly = adminOnly;
+
+    const job = this.baseJob('get', { inputSettings });
+    return this.request<any>(job);
+  }
+
+  // ──────────────────────────────────────────────────────
+  // Get Policy Details
+  // ──────────────────────────────────────────────────────
+
+  /**
+   * Get detailed information about specific policies including
+   * categories, tags, report fields, and employees.
+   */
+  async getPolicyDetails(params: {
+    policyIDList: string[];
+    fields?: string[];
+  }) {
+    const inputSettings: Record<string, any> = {
+      type: 'policy',
+      policyIDList: params.policyIDList,
+    };
+    if (params.fields) inputSettings.fields = params.fields;
+
+    const job = this.baseJob('get', { inputSettings });
+    return this.request<any>(job);
+  }
+
+  // ──────────────────────────────────────────────────────
+  // Get Category List (via Policy)
+  // ──────────────────────────────────────────────────────
+
+  /**
+   * Get categories for a specific policy.
+   */
+  async getCategories(policyID: string) {
+    return this.getPolicyDetails({
+      policyIDList: [policyID],
+      fields: ['categories'],
+    });
+  }
+
+  // ──────────────────────────────────────────────────────
+  // Get Tag List (via Policy)
+  // ──────────────────────────────────────────────────────
+
+  /**
+   * Get tags for a specific policy.
+   */
+  async getTags(policyID: string) {
+    return this.getPolicyDetails({
+      policyIDList: [policyID],
+      fields: ['tags'],
+    });
+  }
+
+  // ──────────────────────────────────────────────────────
+  // Update Policy Categories
+  // ──────────────────────────────────────────────────────
+
+  /**
+   * Update categories on a policy (add, enable, disable).
+   */
+  async updateCategories(params: {
+    policyID: string;
+    categories: string;
+  }) {
+    const inputSettings: Record<string, any> = {
+      type: 'categories',
+      policyID: params.policyID,
+    };
+
+    const job = this.baseJob('update', { inputSettings });
+    return this.request<any>(job, { data: params.categories });
+  }
+
+  // ──────────────────────────────────────────────────────
+  // Update Policy Tags
+  // ──────────────────────────────────────────────────────
+
+  /**
+   * Update tags on a policy.
+   */
+  async updateTags(params: {
+    policyID: string;
+    tags: string;
+  }) {
+    const inputSettings: Record<string, any> = {
+      type: 'tags',
+      policyID: params.policyID,
+    };
+
+    const job = this.baseJob('update', { inputSettings });
+    return this.request<any>(job, { data: params.tags });
+  }
+
+  // ──────────────────────────────────────────────────────
+  // Reconciliation Report
+  // ──────────────────────────────────────────────────────
+
+  /**
+   * Export reconciliation report data for corporate card transactions.
+   */
+  async getReconciliation(params: {
+    startDate: string;
+    endDate: string;
+    domain?: string;
+  }) {
+    const filters: Record<string, any> = {
+      startDate: params.startDate,
+      endDate: params.endDate,
+    };
+    if (params.domain) filters.domain = params.domain;
+
+    const inputSettings: Record<string, any> = {
+      type: 'reconciliation',
+      filters,
+    };
+
+    const job = this.baseJob('reconciliation', { inputSettings });
+
+    const template = [
+      '[<#list cards as card>',
+      '{',
+      '  "cardNumber": "${card.cardNumber}",',
+      '  "cardName": "${card.cardName}",',
+      '  "bank": "${card.bank}",',
+      '  "transactions": [<#list card.transactionList as t>',
+      '    {"merchant":"${t.merchant}","amount":${t.amount},"posted":"${t.posted}","category":"${t.category}"}<#if t_has_next>,</#if>',
+      '  </#list>]',
+      '}<#if card_has_next>,</#if>',
+      '</#list>]',
+    ].join('\n');
+
+    return this.request<any>(job, { template });
+  }
+
+  // ──────────────────────────────────────────────────────
+  // Update Report Status
+  // ──────────────────────────────────────────────────────
+
+  /**
+   * Mark reports as exported or change their status.
+   * Used for marking reports after successful processing.
+   */
+  async updateReportStatus(params: {
+    reportIDList: string[];
+    status: string;
+  }) {
+    const inputSettings: Record<string, any> = {
+      type: 'reportStatus',
+      status: params.status,
+      reportIDList: params.reportIDList,
+    };
+
+    const job = this.baseJob('update', { inputSettings });
+    return this.request<any>(job);
+  }
+
+  // ──────────────────────────────────────────────────────
+  // Get Domain Cards
+  // ──────────────────────────────────────────────────────
+
+  /**
+   * Get list of corporate card feeds for a domain.
+   * Requires domain admin access.
+   */
+  async getDomainCards(domain: string) {
+    const inputSettings: Record<string, any> = {
+      type: 'cardList',
+      domain,
+    };
+
+    const job = this.baseJob('get', { inputSettings });
+    return this.request<any>(job);
+  }
+}
