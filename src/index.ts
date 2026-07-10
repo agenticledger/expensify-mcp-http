@@ -54,9 +54,27 @@ const SLUG = 'expensify';
 const NAME = 'Expensify MCP Server';
 const VERSION = '2.0.0';
 
-/** Construct a ExpensifyClient from a broker-resolved (or raw passthrough) credential. */
+/** Construct a ExpensifyClient from a broker-resolved (or raw passthrough) credential.
+ * Accepts either a JSON object ({partnerUserID,partnerUserSecret} | {id,secret})
+ * OR the raw colon-delimited string the static vault stores: "partnerUserID:partnerUserSecret".
+ * Never throws a fatal SyntaxError (that would crash the process). */
 function makeClient(credential: string): ExpensifyClient {
-  const o = JSON.parse(credential); return new ExpensifyClient(o.partnerUserID ?? o.id, o.partnerUserSecret ?? o.secret);
+  const cred = (credential ?? '').trim();
+  // Try JSON first (only when it actually looks like an object).
+  if (cred.startsWith('{')) {
+    try {
+      const o = JSON.parse(cred);
+      return new ExpensifyClient(o.partnerUserID ?? o.id, o.partnerUserSecret ?? o.secret);
+    } catch {
+      // fall through to string parsing
+    }
+  }
+  // Raw "partnerUserID:partnerUserSecret" — split on the FIRST colon only.
+  const idx = cred.indexOf(':');
+  if (idx === -1) {
+    throw new Error('Invalid Expensify credential: expected JSON or "partnerUserID:partnerUserSecret".');
+  }
+  return new ExpensifyClient(cred.slice(0, idx), cred.slice(idx + 1));
 }
 
 // --- Principal transport (platform-gateway contract) ---
