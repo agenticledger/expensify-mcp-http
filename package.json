@@ -1,13 +1,15 @@
 {
   "name": "expensify-mcp-http",
   "version": "1.0.0",
-  "description": "Expensify MCP Server — Exposed via Streamable HTTP transport",
+  "description": "Expensify MCP Server \u2014 Exposed via Streamable HTTP transport",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx src/index.ts"
+    "dev": "tsx src/index.ts",
+    "test": "node --import tsx --test test/*.test.ts",
+    "pretest": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.0",

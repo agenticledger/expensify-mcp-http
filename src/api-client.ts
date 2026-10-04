@@ -18,7 +18,7 @@ export class ExpensifyClient {
   private partnerUserID: string;
   private partnerUserSecret: string;
 
-  constructor(partnerUserID: string, partnerUserSecret: string) {
+  constructor(partnerUserID: string, partnerUserSecret: string, private readonly fetchRequest: typeof fetch = fetch) {
     this.partnerUserID = partnerUserID;
     this.partnerUserSecret = partnerUserSecret;
   }
@@ -40,7 +40,7 @@ export class ExpensifyClient {
       });
     }
 
-    const response = await fetch(ENDPOINT, {
+    const response = await this.fetchRequest(ENDPOINT, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -49,8 +49,8 @@ export class ExpensifyClient {
     });
 
     if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Expensify API Error ${response.status}: ${text}`);
+      await response.body?.cancel();
+      throw new Error('Expensify request failed.');
     }
 
     const text = await response.text();
